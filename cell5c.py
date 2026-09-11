@@ -97,8 +97,14 @@ if not os.path.exists(alvo):
     cand = [p for p in glob.glob(os.path.join(BASE, '**/diffusion_pytorch_model.safetensors'),
                                  recursive=True) if 'flash-pro' in p]
     if cand:
-        print(f'   copiando transformer ({os.path.getsize(cand[0])/1e9:.2f} GB)...')
-        shutil.copy(cand[0], alvo)
+        # LINK, nao copy: copiar 3,73 GB travou no /kaggle/temp (o passo que
+        # pendurou a execucao). O torch.load le por link igual.
+        try:
+            os.symlink(cand[0], alvo)
+            print(f'   ligado transformer -> {os.path.basename(os.path.dirname(cand[0]))}')
+        except Exception as e:
+            print(f'   symlink falhou ({e}); copiando...')
+            shutil.copy(cand[0], alvo)
     else:
         print(f'   !! nao achei os pesos do flash-pro em {BASE}')
 
@@ -154,31 +160,54 @@ for caminho in ['diffusers.models.model_loading_utils',
 #    (usa lista de linhas -> zero problema de aspas aninhadas)
 # ─────────────────────────────────────────────────────────────────────────────
 LINHAS_PATCH = [
-    '"""Runner com patch: religa low_cpu_mem_usage no EchoMimic (diffusers >= 0.33)."""',
+    '"""Runner com patch: conserta low_cpu_mem_usage E o pico de RAM do torch.load."""',
     'import sys, runpy',
     'import diffusers',
     'import diffusers.models.modeling_utils as mu',
+    'import torch',
     '',
+    '# ── PATCH 1: religar low_cpu_mem_usage (o repo importa do modulo antigo) ──',
     '_f = None',
     'try:',
     '    from diffusers.models.model_loading_utils import load_model_dict_into_meta as _f',
-    '    print("[patch] load_model_dict_into_meta injetado de model_loading_utils")',
+    '    print("[patch1] load_model_dict_into_meta injetado de model_loading_utils")',
     'except Exception as e1:',
     '    try:',
     '        from diffusers.models.modeling_utils import load_model_dict_into_meta as _f',
-    '        print("[patch] ja existia no caminho antigo")',
+    '        print("[patch1] ja existia no caminho antigo")',
     '    except Exception as e2:',
-    '        print("[patch] NAO ACHEI a funcao:", repr(e1), repr(e2))',
-    '',
+    '        print("[patch1] NAO ACHEI a funcao:", repr(e1), repr(e2))',
     'if _f is not None:',
     '    mu.load_model_dict_into_meta = _f',
-    '',
-    '# confere se o import do repo agora funciona',
     'try:',
     '    from diffusers.models.modeling_utils import load_model_dict_into_meta  # noqa',
-    '    print("[patch] VERIFICADO: o import do repo agora funciona")',
+    '    print("[patch1] VERIFICADO: o import do repo agora funciona")',
     'except Exception as e:',
-    '    print("[patch] AINDA FALHA:", repr(e))',
+    '    print("[patch1] AINDA FALHA:", repr(e))',
+    '',
+    '# ── PATCH 2: torch.load com mmap (o que o llama.cpp faz) ──',
+    '# O T5 e um .pth de 11,36 GB. Sem mmap, torch.load le TUDO para a RAM e',
+    '# o pico chega a ~22 GB -> o matador de memoria mata (exit 137).',
+    '# Com mmap=True o arquivo e MAPEADO: a RAM so e usada pagina a pagina.',
+    '_load_orig = torch.load',
+    '_cont = {"n": 0}',
+    'def _torch_load_mmap(*a, **kw):',
+    '    if kw.get("map_location") is not None or "map_location" not in kw:',
+    '        kw.setdefault("mmap", True)',
+    '        try:',
+    '            r = _load_orig(*a, **kw)',
+    '            _cont["n"] += 1',
+    '            print(f"[patch2] torch.load com mmap OK ({_cont[\'n\']}x)")',
+    '            return r',
+    '        except Exception as e:',
+    '            print("[patch2] mmap falhou, caindo no modo normal:", repr(e)[:120])',
+    '            kw.pop("mmap", None)',
+    '    return _load_orig(*a, **kw)',
+    'torch.load = _torch_load_mmap',
+    'print("[patch2] torch.load com mmap=True instalado")',
+    '',
+    '# ── PATCH 3: liberar a RAM do state_dict assim que possivel ──',
+    'import gc',
     '',
     'sys.argv = ["infer_flash.py"] + sys.argv[1:]',
     'runpy.run_path("infer_flash.py", run_name="__main__")',
