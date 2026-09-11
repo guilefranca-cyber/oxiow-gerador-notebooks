@@ -59,6 +59,16 @@ print(f'FLASH: {FLASH}')
 import shutil
 
 BASE = os.environ.get('OXIOW_PESOS') or os.path.join(os.path.dirname(REPO), 'pesos')
+# Se os pesos vierem de DATASET do Kaggle (/kaggle/input, somente leitura), usar de la:
+# sobrevivem ao fim da sessao e nao custam download.
+for _cand in glob.glob('/kaggle/input/*/echomimic-weights') + \
+             glob.glob('/kaggle/input/*echomimic*/**/Wan2.1-Fun-V1.1-1.3B-InP',
+                       recursive=True):
+    _dir = _cand if os.path.basename(_cand) == 'echomimic-weights' else os.path.dirname(_cand)
+    if os.path.isdir(os.path.join(_dir, 'Wan2.1-Fun-V1.1-1.3B-InP')):
+        BASE = _dir
+        print(f'>>> usando os pesos do DATASET: {BASE}')
+        break
 os.makedirs(FLASH, exist_ok=True)
 
 
@@ -206,11 +216,41 @@ LINHAS_PATCH = [
     'torch.load = _torch_load_mmap',
     'print("[patch2] torch.load com mmap=True instalado")',
     '',
-    '# ── PATCH 3: liberar a RAM do state_dict assim que possivel ──',
-    'import gc',
+    '# ── PATCH 3: aliviador de RAM rodando durante toda a carga ──',
+    '# O coletor de lixo do Python segura tensores "mortos" do state_dict.',
+    '# Forcar gc.collect() em paralelo devolve essa RAM enquanto o modelo carrega.',
+    'import gc, threading, time',
+    '_parar_gc = threading.Event()',
+    'def _aliviar():',
+    '    n = 0',
+    '    while not _parar_gc.is_set():',
+    '        gc.collect()',
+    '        try:',
+    '            import torch as _t',
+    '            if _t.cuda.is_available():',
+    '                _t.cuda.empty_cache()',
+    '        except Exception:',
+    '            pass',
+    '        n += 1',
+    '        if n % 20 == 0:',
+    '            try:',
+    '                with open("/proc/meminfo") as _f:',
+    '                    _m = {l.split(":")[0]: int(l.split()[1]) for l in _f if ":" in l}',
+    '                _usado = (_m["MemTotal"] - _m["MemAvailable"]) / 1e6',
+    '                _tot = _m["MemTotal"] / 1e6',
+    '                print(f"[ram] {_usado:.1f} / {_tot:.1f} GB usados", flush=True)',
+    '            except Exception:',
+    '                pass',
+    '        time.sleep(0.5)',
+    '_th = threading.Thread(target=_aliviar, daemon=True)',
+    '_th.start()',
+    'print("[patch3] aliviador de RAM ligado (gc.collect a cada 0,5 s)")',
     '',
     'sys.argv = ["infer_flash.py"] + sys.argv[1:]',
-    'runpy.run_path("infer_flash.py", run_name="__main__")',
+    'try:',
+    '    runpy.run_path("infer_flash.py", run_name="__main__")',
+    'finally:',
+    '    _parar_gc.set()',
 ]
 with open(os.path.join(REPO, 'run_patched.py'), 'w') as fh:
     fh.write('\n'.join(LINHAS_PATCH) + '\n')
