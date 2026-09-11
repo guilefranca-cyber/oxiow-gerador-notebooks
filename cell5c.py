@@ -52,6 +52,86 @@ print(f'REPO: {REPO}')
 print(f'FLASH: {FLASH}')
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 0b. MONTAR A ESTRUTURA ./flash (idempotente)
+#     O repo espera: flash/Wan2.1-Fun-V1.1-1.3B-InP , flash/chinese-wav2vec2-base ,
+#     flash/transformer/diffusion_pytorch_model.safetensors
+# ─────────────────────────────────────────────────────────────────────────────
+import shutil
+
+BASE = os.environ.get('OXIOW_PESOS') or os.path.join(os.path.dirname(REPO), 'pesos')
+os.makedirs(FLASH, exist_ok=True)
+
+
+def remover(p):
+    """Apaga com o metodo certo: shutil.rmtree em symlink levanta OSError."""
+    if os.path.islink(p):
+        os.unlink(p)
+    elif os.path.isdir(p):
+        shutil.rmtree(p)
+    elif os.path.exists(p):
+        os.remove(p)
+
+
+print(f'\n=== MONTANDO ./flash (origem: {BASE}) ===')
+for nome in ['Wan2.1-Fun-V1.1-1.3B-InP', 'chinese-wav2vec2-base']:
+    src = os.path.join(BASE, nome)
+    dst = os.path.join(FLASH, nome)
+    if not os.path.isdir(src):
+        print(f'   !! falta a origem: {src}')
+        continue
+    if os.path.exists(dst) or os.path.islink(dst):
+        remover(dst)
+    try:
+        os.symlink(src, dst)
+        tam = sum(os.path.getsize(os.path.join(r, a))
+                  for r, _d, fs in os.walk(src) for a in fs)
+        print(f'   ligado {nome}  ({tam/1e9:.2f} GB)')
+    except Exception as e:
+        shutil.copytree(src, dst)
+        print(f'   copiado {nome} (symlink falhou: {e})')
+
+tf = os.path.join(FLASH, 'transformer')
+os.makedirs(tf, exist_ok=True)
+alvo = os.path.join(tf, 'diffusion_pytorch_model.safetensors')
+if not os.path.exists(alvo):
+    cand = [p for p in glob.glob(os.path.join(BASE, '**/diffusion_pytorch_model.safetensors'),
+                                 recursive=True) if 'flash-pro' in p]
+    if cand:
+        print(f'   copiando transformer ({os.path.getsize(cand[0])/1e9:.2f} GB)...')
+        shutil.copy(cand[0], alvo)
+    else:
+        print(f'   !! nao achei os pesos do flash-pro em {BASE}')
+
+# conferencia rapida
+print('\n--- estrutura ./flash ---')
+for item in ['Wan2.1-Fun-V1.1-1.3B-InP', 'chinese-wav2vec2-base', 'transformer']:
+    p = os.path.join(FLASH, item)
+    if os.path.isdir(p):
+        tam = sum(os.path.getsize(os.path.join(r, a))
+                  for r, _d, fs in os.walk(p) for a in fs)
+    elif os.path.exists(p):
+        tam = os.path.getsize(p)
+    else:
+        tam = 0
+    ok = tam > 100_000_000
+    print(f'   {"OK " if ok else "!! "} {tam/1e9:6.2f} GB  {item}')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0c. AMBIENTE: quanto de RAM esta maquina tem (o que matou o Colab)
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    with open('/proc/meminfo') as fh:
+        info = {l.split(':')[0]: int(l.split()[1]) for l in fh if ':' in l}
+    ram_gb = info['MemTotal'] / 1e6
+    print(f'\n=== RAM DESTA MAQUINA: {ram_gb:.1f} GB ===')
+    if ram_gb < 20:
+        print('   >>> AVISO: menos de 20 GB. O modelo pede ~22 GB (T5 11,4 + CLIP 4,8 + resto).')
+        print('   >>> O Colab gratis (12,7 GB) MORRE com exit 137. Use o Kaggle (33,7 GB).')
+except Exception:
+    pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. ONDE ESTA a funcao nesta versao do diffusers
 # ─────────────────────────────────────────────────────────────────────────────
 print('\n=== VERSAO E LOCALIZACAO ===')
