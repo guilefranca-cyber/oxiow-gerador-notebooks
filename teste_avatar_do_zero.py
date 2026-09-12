@@ -207,40 +207,70 @@ print("  6/8 · GERANDO (FlashHead Lite)")
 print("=" * 78)
 ck = os.path.join(MODELOS, "SoulX-FlashHead-1_3B")
 w2v = os.path.join(MODELOS, "wav2vec2-base-960h")
-cmd = [sys.executable, "generate_video.py", "--ckpt_dir", ck, "--wav2vec_dir", w2v,
-       "--model_type", "lite", "--cond_image", ROSTO, "--audio_path", AUDIO,
-       "--audio_encode_mode", "stream"]
-print("   comando:", " ".join(cmd))
-print("   a saida aparece AO VIVO abaixo\n")
+
+# ── MULTI-GPU: o repo deriva o paralelismo de world_size (nao tem flag) ──
+# get_parallel_degree(world_size, num_heads): ulysses = gcd(world, heads), ring = world/ulysses
+# Com 2 GPUs e 32 heads -> ulysses_degree=2 (o README NAO documenta isso).
+N_GPU = torch.cuda.device_count()
+print(f"   GPUs detectadas: {N_GPU}")
+usar_dist = N_GPU >= 2
+if usar_dist:
+    print(f"   -> tentando torchrun --nproc_per_node={N_GPU} (ganho esperado 1,6-1,9x)")
+else:
+    print("   -> 1 GPU (processo unico)")
+
+BASE_CMD = ["generate_video.py", "--ckpt_dir", ck, "--wav2vec_dir", w2v,
+            "--model_type", "lite", "--cond_image", ROSTO, "--audio_path", AUDIO,
+            "--audio_encode_mode", "stream"]
+
 env = dict(os.environ)
 env["PYTHONPATH"] = os.pathsep.join([os.path.join(TEMP, "_shim"), REPO,
                                      env.get("PYTHONPATH", "")])
 env["PYTHONUNBUFFERED"] = "1"
-t0 = time.time()
-p = subprocess.Popen(cmd, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                     text=True, bufsize=1, env=env)
-for linha in p.stdout:
-    L = linha.rstrip()
-    if any(k in L for k in ("chunk-", "Finished", "Saving", "Error", "error", "Traceback",
-                            "denoise per step", "Data preparation")):
-        print("      " + L, flush=True)
-p.wait()
-print(f"\n   exit: {p.returncode}  tempo: {(time.time()-t0)/60:.1f} min")
-if p.returncode != 0:
-    print("   >>> FALHOU. Mandar as 40 ultimas linhas.")
-    raise SystemExit(1)
 
-# ── so conta video NOVO (evita o falso positivo dos assets do repo) ──
-brutos = set()
-for raiz in (os.path.join(REPO, "sample_results"), os.path.join(REPO, "results"), TEMP):
-    brutos |= set(glob.glob(os.path.join(raiz, "**", "*.mp4"), recursive=True))
-novos = [v for v in brutos if os.path.getmtime(v) >= t0]
-novos.sort(key=os.path.getmtime, reverse=True)
-print(f"   videos NOVOS: {len(novos)}  (de {len(brutos)} mp4 encontrados)")
-if not novos:
-    print("   >>> nenhum video novo! O job nao produziu saida.")
+FILTRO_LOG = ("chunk-", "Finished", "Saving", "Error", "error", "Traceback",
+              "denoise per step", "Data preparation", "rank=", "ulysses_degree")
+
+
+def gerar(distribuido):
+    """Roda a geracao em subprocesso. Retorna (exit, segundos, caminho_ou_None)."""
+    if distribuido:
+        cmd = ["torchrun", "--nproc_per_node", str(N_GPU),
+               "--master_port", "29511"] + BASE_CMD
+    else:
+        cmd = [sys.executable] + BASE_CMD
+    print(f"\n   comando: {' '.join(cmd[:6])} ...")
+    print("   a saida aparece AO VIVO abaixo\n")
+    t = time.time()
+    proc = subprocess.Popen(cmd, cwd=REPO, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    for linha in proc.stdout:
+        L = linha.rstrip()
+        if any(k in L for k in FILTRO_LOG):
+            print("      " + L, flush=True)
+    proc.wait()
+    dur = time.time() - t
+    print(f"\n   exit: {proc.returncode}  tempo: {dur/60:.1f} min")
+    achados = set()
+    for raiz in (os.path.join(REPO, "sample_results"), os.path.join(REPO, "results"), TEMP):
+        achados |= set(glob.glob(os.path.join(raiz, "**", "*.mp4"), recursive=True))
+    novos = sorted([v for v in achados if os.path.getmtime(v) >= t],
+                   key=os.path.getmtime, reverse=True)
+    return proc.returncode, dur, (novos[0] if novos else None)
+
+
+t0 = time.time()
+rc, dur2, BRUTO = gerar(usar_dist)
+MODO = f"{N_GPU} GPUs (torchrun)"
+if rc != 0 or not BRUTO:
+    if usar_dist:
+        print("\n   ⚠️ o modo 2 GPUs NAO funcionou -> caindo para 1 GPU")
+        rc, dur2, BRUTO = gerar(False)
+        MODO = "1 GPU (fallback do multi-GPU)"
+if rc != 0 or not BRUTO:
+    print("   >>> FALHOU nos dois modos. Mandar as 40 ultimas linhas.")
     raise SystemExit(1)
-BRUTO = novos[0]
+print(f"\n   ✅ modo usado: {MODO}")
 print(f"   arquivo: {BRUTO}  ({os.path.getsize(BRUTO)/1e6:.2f} MB)")
 run(f"ffprobe -v error -show_entries stream=width,height,codec_name,duration -of csv=p=0 {BRUTO}",
     tolerante=True)
