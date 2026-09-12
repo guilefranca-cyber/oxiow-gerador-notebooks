@@ -142,20 +142,42 @@ except Exception as e:
     print("   xformers ....: nao disponivel ->", str(e)[:90])
     print("      (o repo consegue rodar sem ele; sera usado SDPA do proprio torch)")
 
-try:
-    import mediapipe
-    print("   mediapipe ...: OK", mediapipe.__version__)
-except Exception as e:
-    print("   mediapipe ...: problema conhecido ->", str(e)[:110])
-    print("      >>> tentando consertar (downgrade de numpy e reinstall)")
-    run([sys.executable, "-m", "pip", "install", "-q", "numpy<2", "mediapipe==0.10.9"],
-        tolerante=True, mostrar=False)
+# ── MediaPipe: o pitfall nº1 no Colab (documentado por terceiros) ───────────
+# "MediaPipe recently changed its packaging on Colab's Python 3.11 runtime.
+#  The face detector crashes on import."
+# O MediaPipe so serve para o CORTE DE ROSTO (--use_face_crop). Como nao pedimos
+# esse corte, a solucao honesta quando ele nao instala e um SHIM MINIMO que deixa
+# o import passar — e grita alto se alguem realmente tentar usar o detector.
+def _consertar_mediapipe():
     try:
         import mediapipe
-        print("   mediapipe ...: OK agora")
-    except Exception as e2:
-        print("   mediapipe ...: segue falhando:", str(e2)[:110])
-        print("      (se a inferencia reclamar, rodamos com --no-mediapipe se existir)")
+        return f"OK {mediapipe.__version__}"
+    except Exception as e1:
+        print(f"      (mediapipe falhou: {str(e1)[:80]}) — tentando consertar...")
+        run([sys.executable, "-m", "pip", "install", "-q", "numpy<2"], tolerante=True, mostrar=False)
+        run([sys.executable, "-m", "pip", "install", "-q", "mediapipe==0.10.9"],
+            tolerante=True, mostrar=False)
+        try:
+            import mediapipe
+            return f"OK {mediapipe.__version__} (apos conserto)"
+        except Exception as e2:
+            print(f"      (segue falhando: {str(e2)[:70]})")
+            print("      >>> aplicando SHIM: o import passa, e se o detector for")
+            print("          realmente chamado ele avisa (nos nao usamos face_crop).")
+            import types, sys as _s
+            shim = types.ModuleType("mediapipe")
+            def _nao_usado(*a, **k):
+                raise RuntimeError(
+                    "mediapipe nao esta disponivel neste runtime. "
+                    "O detector de rosto nao e usado quando --use_face_crop=False. "
+                    "Se esta mensagem apareceu, a pipeline tentou cortar o rosto.")
+            shim.solutions = types.SimpleNamespace(
+                face_detection=types.SimpleNamespace(FaceDetection=_nao_usado))
+            shim.__version__ = "0.0.0-shim"
+            _s.modules["mediapipe"] = shim
+            return "SHIM aplicado (import OK, detector indisponivel — nao usamos)"
+
+print("   mediapipe ...:", _consertar_mediapipe())
 
 for mod in ["cv2", "diffusers", "transformers", "librosa", "decord", "easydict", "pyloudnorm"]:
     try:
