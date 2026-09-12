@@ -292,31 +292,55 @@ print()
 print("=" * 78)
 print("  6/7 · PROCURANDO O VIDEO")
 print("=" * 78)
-vids = sorted(set(
-    glob.glob(os.path.join(TEMP, "**", "*.mp4"), recursive=True) +
-    glob.glob(os.path.join(REPO, "outputs", "**", "*.mp4"), recursive=True) +
-    glob.glob(os.path.join(RAIZ, "**", "*.mp4"), recursive=True)
-), key=lambda v: os.path.getmtime(v), reverse=True)
+# ⚠️ CORRECAO v2: so conta MP4 CRIADO DEPOIS do teste comecar (mtime > t0).
+# A v1 pegava *.mp4 de dentro do repo e dava FALSO POSITIVO (os tutoriais do
+# proprio WanGP em preprocessing/matanyone/).
+MARCA = t0  # instante em que a inferencia comecou
+def eh_novo(v):
+    try:
+        return os.path.getmtime(v) >= MARCA
+    except Exception:
+        return False
+
+brutos = set()
+for raiz in (TEMP, os.path.join(REPO, "outputs"), os.path.join(REPO, "samples"), RAIZ):
+    brutos |= set(glob.glob(os.path.join(raiz, "**", "*.mp4"), recursive=True))
+vids = [v for v in brutos if eh_novo(v)]
+vids.sort(key=os.path.getmtime, reverse=True)
+
+descartados = [v for v in brutos if not eh_novo(v)]
 if vids:
-    for v in vids[:5]:
-        print(f"   {os.path.getsize(v)/1e6:8.2f} MB  {v}")
+    print("   ✅ gerados NESTA execucao:")
+    for v in vids[:8]:
+        print(f"      {os.path.getsize(v)/1e6:8.2f} MB  {v}")
 else:
-    print("   nenhum mp4 encontrado")
+    print("   nenhum video NOVO gerado nesta execucao")
+    if descartados:
+        print(f"   ({len(descartados)} mp4 antigos/do repo ignorados — tutoriais, assets, etc.)")
+
 
 print()
 print("=" * 78)
 print("  7/7 · VEREDITO")
 print("=" * 78)
 if vids and p.returncode == 0:
-    print("   ✅ O LONGCAT RODOU NESTA MAQUINA")
-    print(f"   pegue o arquivo: {vids[0]}")
+    print("   ✅ O LONGCAT RODOU E GEROU VIDEO NESTA MAQUINA")
+    print(f"   arquivo: {vids[0]}  ({os.path.getsize(vids[0])/1e6:.2f} MB)")
 elif vids:
-    print("   🟡 gerou video, mas o processo saiu com erro — o mp4 pode valer")
-else:
-    print("   ❌ nao gerou video")
+    print("   🟡 gerou video NOVO, mas o processo saiu com erro — o mp4 pode valer")
+    print(f"   arquivo: {vids[0]}")
+elif p.returncode == 0:
+    print("   ❌ o script terminou SEM ERRO mas NAO gerou nenhum video novo")
+    print("      -> o job rodou e nao produziu saida (ou falhou em silencio).")
     print("\n   --- o que me mandar de volta ---")
-    print("      as 40 ultimas linhas da saida, e o numero do CHECKPOINT onde parou")
+    print("      o bloco '[api] defaults do proprio WanGP' (as chaves reais dos settings)")
+    print("      o bloco '[RESULTADO]' (sucesso/erros que o job devolveu)")
+    print("      e a lista de arquivos em", TEMP)
+    print("      (na 1a vez ele baixa ~22 GB; se nao houve download, o job nem chegou a rodar)")
+else:
+    print("   ❌ nao gerou video (exit != 0)")
+    print("\n   --- o que me mandar de volta ---")
+    print("      as 40 ultimas linhas e o numero do CHECKPOINT onde parou")
     print("      • CUDA out of memory -> baixar video_length de 93 para 49")
     print("      • erro no download    -> conferir espaco em", TEMP)
     print("      • erro de chave de settings -> me manda o bloco '[api] defaults do proprio WanGP'")
-    print("        (ele imprime as chaves reais, e eu ajusto o script na hora)")
