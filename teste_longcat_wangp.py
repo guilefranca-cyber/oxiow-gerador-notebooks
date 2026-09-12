@@ -100,22 +100,73 @@ print()
 print("=" * 78)
 print("  3/7 · DEPENDENCIAS")
 print("=" * 78)
-try:
-    import mmgp
-    print("   mmgp .......: OK", getattr(mmgp, "__version__", ""))
-except Exception:
-    print("   mmgp .......: instalando")
-    run([sys.executable, "-m", "pip", "install", "-q", "mmgp"], tolerante=True)
-for mod in ["torchcodec", "gguf", "transformers", "diffusers"]:
+
+# ── BLINDAGEM 1: o torchaudio esta saudavel? ──────────────────────────────
+# Se uma sessao anterior baixou o torch (erro conhecido), o torchaudio fica
+# com ABI desalinhada -> "undefined symbol: torch_library_impl" em qualquer
+# import de torchaudio. Conserta ANTES de qualquer outra coisa.
+def torchaudio_ok():
     try:
-        __import__(mod); print(f"   {mod:12s}: OK")
+        import torchaudio  # noqa
+        import torchaudio.functional  # noqa
+        return True
+    except Exception:
+        return False
+
+print(f"   torch .......: {torch.__version__}")
+if torchaudio_ok():
+    print("   torchaudio ..: OK")
+else:
+    print("   torchaudio ..: QUEBRADO -> consertando")
+    _v = torch.__version__.split("+")[0]
+    run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall",
+         f"torchaudio=={_v}"], tolerante=True, mostrar=False)
+    if torchaudio_ok():
+        print(f"   torchaudio ..: consertado (=={_v})")
+    else:
+        print("   >>> ainda quebrado. TENTE: Runtime -> Restart session, e rode de novo.")
+        print("   >>> (o torch desta sessao foi alterado por um script anterior)")
+        raise SystemExit(1)
+
+# trava o torch para o pip nao trocar por dependencia (torchcodec/mmgp puxam)
+_trava = os.path.join(TEMP, "trava_torch.txt")
+try:
+    import torchaudio as _ta
+    _tv = _ta.__version__
+except Exception:
+    _tv = torch.__version__
+with open(_trava, "w") as f:
+    f.write(f"torch=={torch.__version__}\n")
+    f.write(f"torchaudio=={_tv}\n")
+print(f"   trava .......: torch=={torch.__version__} + torchaudio=={_tv} (protege o pip)")
+
+for mod in ["mmgp", "torchcodec", "gguf"]:
+    try:
+        __import__(mod)
+        print(f"   {mod:12s}: OK")
+    except Exception:
+        print(f"   {mod:12s}: instalando (com a trava)")
+        run([sys.executable, "-m", "pip", "install", "-q", "-c", _trava, mod],
+            tolerante=True, mostrar=False)
+for mod in ["transformers", "diffusers"]:
+    try:
+        __import__(mod)
+        print(f"   {mod:12s}: OK")
     except Exception:
         print(f"   {mod:12s}: instalando")
-        run([sys.executable, "-m", "pip", "install", "-q", mod], tolerante=True)
-print("   --- requirements do repo (tolerante) ---")
-rc, _ = run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
+        run([sys.executable, "-m", "pip", "install", "-q", "-c", _trava, mod],
             tolerante=True, mostrar=False)
-print("   requirements:", "OK" if rc == 0 else "falhou em algum pacote (seguindo)")
+print("   --- requirements do repo (tolerante, com a trava) ---")
+rc, _ = run([sys.executable, "-m", "pip", "install", "-q", "-c", _trava,
+             "-r", "requirements.txt"], tolerante=True, mostrar=False)
+print("   requirements:", "OK" if rc == 0 else "algum pacote falhou (seguindo)")
+
+# confere que o torchaudio SOBREVIVEU as instalacoes
+if not torchaudio_ok():
+    print("   ⚠️ o pip trocou o torchaudio -> reinstalando na versao do torch")
+    run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall",
+         f"torchaudio=={torch.__version__.split('+')[0]}"], tolerante=True, mostrar=False)
+    print("   torchaudio ..:", "OK" if torchaudio_ok() else "AINDA QUEBRADO")
 print("=== CHECKPOINT 3: OK ===")
 
 print()
